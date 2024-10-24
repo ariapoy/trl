@@ -29,6 +29,7 @@ from ..models import DDPOStableDiffusionPipeline
 from . import BaseTrainer, DDPOConfig
 from .utils import PerPromptStatTracker, generate_model_card
 
+from tqdm import tqdm
 
 if is_wandb_available():
     import wandb
@@ -420,6 +421,21 @@ class DDPOTrainer(BaseTrainer):
             eps=self.config.train_adam_epsilon,
         )
 
+    def save_model(self, output_dir: Optional[str] = None, _internal_call: bool = False):
+        backup_model = self.model
+        self.model = self.model.policy  # save only the policy
+
+        if self.is_deepspeed_enabled:
+            backup_deepspeed = self.deepspeed
+            self.deepspeed = self.model
+
+        super().save_model(output_dir, _internal_call)
+
+        self.model = backup_model
+
+        if self.is_deepspeed_enabled:
+            self.deepspeed = backup_deepspeed
+
     def _save_model_hook(self, models, weights, output_dir):
         self.sd_pipeline.save_checkpoint(models, weights, output_dir)
         weights.pop()  # ensures that accelerate doesn't try to handle saving of the model
@@ -585,12 +601,12 @@ class DDPOTrainer(BaseTrainer):
         global_step = 0
         if epochs is None:
             epochs = self.config.num_epochs
-        for epoch in range(self.first_epoch, epochs):
+        for epoch in tqdm(range(self.first_epoch, epochs)):
             global_step = self.step(epoch, global_step)
 
     def _save_pretrained(self, save_directory):
         self.sd_pipeline.save_pretrained(save_directory)
-        self.create_model_card()
+        # self.create_model_card()
 
     def create_model_card(
         self,

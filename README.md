@@ -1,5 +1,13 @@
 # TRL - Transformer Reinforcement Learning
 
+## Poy's note
+
+### Install
+
+```shell
+pip install diffusers peft
+```
+
 <div style="text-align: center">
 <img src="https://huggingface.co/datasets/trl-internal-testing/example-images/resolve/main/images/trl_banner_dark.png" alt="TRL Banner">
 </div>

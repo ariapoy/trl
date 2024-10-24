@@ -34,6 +34,9 @@ import torch.nn as nn
 from huggingface_hub import hf_hub_download
 from huggingface_hub.utils import EntryNotFoundError
 from transformers import CLIPModel, CLIPProcessor, HfArgumentParser, is_torch_npu_available, is_torch_xpu_available
+from transformers import AutoProcessor, AutoModel
+
+from datasets import load_dataset
 
 from trl import DDPOConfig, DDPOTrainer, DefaultDDPOStableDiffusionPipeline
 
@@ -129,41 +132,105 @@ def aesthetic_scorer(hub_model_id, model_filename):
 
     return _fn
 
+class PickScore(torch.nn.Module):
+    """
+    This is from https://github.com/yuvalkirstain/PickScore
+    """
+
+    def __init__(self, *, dtype, model_id="yuvalkirstain/PickScore_v1"):
+        super().__init__()
+        # load model
+        processor_name_or_path = "laion/CLIP-ViT-H-14-laion2B-s32B-b79K"
+        model_pretrained_name_or_path = model_id
+
+        self.processor = AutoProcessor.from_pretrained(processor_name_or_path)
+        self.model = AutoModel.from_pretrained(model_pretrained_name_or_path)
+        self.dtype = dtype
+        self.eval()
+
+    @torch.no_grad()
+    def __call__(self, images, prompts):
+        device = next(self.parameters()).device
+
+        # preprocess
+        image_inputs = self.processor(
+            images=images,
+            padding=True,
+            truncation=True,
+            max_length=77,
+            return_tensors="pt",
+        ).to(device)
+        text_inputs = self.processor(
+            text=prompts,
+            padding=True,
+            truncation=True,
+            max_length=77,
+            return_tensors="pt",
+        ).to(device)
+
+        with torch.no_grad():
+            # embed
+            image_embs = self.model.get_image_features(**image_inputs)
+            image_embs = image_embs / torch.norm(image_embs, dim=-1, keepdim=True)
+    
+            text_embs = self.model.get_text_features(**text_inputs)
+            text_embs = text_embs / torch.norm(text_embs, dim=-1, keepdim=True)
+    
+            # score
+            scores = self.model.logit_scale.exp() * (text_embs @ image_embs.T)[0]
+
+        return scores
+
+def pickscore_score():
+    scorer = PickScore(
+        dtype=torch.float32,
+    )
+    if is_torch_npu_available():
+        scorer = scorer.npu()
+    elif is_torch_xpu_available():
+        scorer = scorer.xpu()
+    else:
+        scorer = scorer.cuda()
+
+    def _fn(images, prompts, metadata):
+        images = (images * 255).round().clamp(0, 255).to(torch.uint8)
+        scores = scorer(images, prompts)
+        return scores, {}
+
+    return _fn
 
 # list of example prompts to feed stable diffusion
-animals = [
-    "cat",
-    "dog",
-    "horse",
-    "monkey",
-    "rabbit",
-    "zebra",
-    "spider",
-    "bird",
-    "sheep",
-    "deer",
-    "cow",
-    "goat",
-    "lion",
-    "frog",
-    "chicken",
-    "duck",
-    "goose",
-    "bee",
-    "pig",
-    "turkey",
-    "fly",
-    "llama",
-    "camel",
-    "bat",
-    "gorilla",
-    "hedgehog",
-    "kangaroo",
-]
-
-
-def prompt_fn():
-    return np.random.choice(animals), {}
+# animals = [
+    # "cat",
+    # "dog",
+    # "horse",
+    # "monkey",
+    # "rabbit",
+    # "zebra",
+    # "spider",
+    # "bird",
+    # "sheep",
+    # "deer",
+    # "cow",
+    # "goat",
+    # "lion",
+    # "frog",
+    # "chicken",
+    # "duck",
+    # "goose",
+    # "bee",
+    # "pig",
+    # "turkey",
+    # "fly",
+    # "llama",
+    # "camel",
+    # "bat",
+    # "gorilla",
+    # "hedgehog",
+    # "kangaroo",
+# ]
+# def prompt_fn():
+    # return np.random.choice(animals), {}
 
 
 def image_outputs_logger(image_data, global_step, accelerate_logger):
@@ -186,11 +253,17 @@ def image_outputs_logger(image_data, global_step, accelerate_logger):
 if __name__ == "__main__":
     parser = HfArgumentParser((ScriptArguments, DDPOConfig))
     script_args, training_args = parser.parse_args_into_dataclasses()
+    args = parser.parse_args()
+    args.dataset_name = 'yuvalkirstain/pickapic_v2'
+    args.dataset_config_name = None
+    args.cache_dir = '/tmp2/lupoy/study-HF/data/pickapics/pickapic_v2/'
+    args.train_data_dir = None
+
     training_args.project_kwargs = {
         "logging_dir": "./logs",
         "automatic_checkpoint_naming": True,
         "total_limit": 5,
-        "project_dir": "./save",
+        "project_dir": "./ddpo_huggingface_trl",
     }
 
     pipeline = DefaultDDPOStableDiffusionPipeline(
@@ -199,17 +272,29 @@ if __name__ == "__main__":
         use_lora=script_args.use_lora,
     )
 
+    dataset = load_dataset(
+        args.dataset_name,
+        args.dataset_config_name,
+        cache_dir=args.cache_dir,
+        data_dir=args.train_data_dir,
+    )
+    prompts = dataset['train']['caption']
+    def prompt_fn():
+        return prompts[np.random.randint(len(dataset['train']))], {}
+
     trainer = DDPOTrainer(
         training_args,
-        aesthetic_scorer(script_args.hf_hub_aesthetic_model_id, script_args.hf_hub_aesthetic_model_filename),
+        pickscore_score(),
         prompt_fn,
         pipeline,
-        image_samples_hook=image_outputs_logger,
+        image_samples_hook=None,
     )
 
     trainer.train()
 
     # Save and push to hub
-    trainer.save_model(training_args.output_dir)
+    # trainer.save_model(training_args.output_dir)
+    trainer._save_pretrained(training_args.project_kwargs['project_dir'])
+    training_args.push_to_hub = False
     if training_args.push_to_hub:
         trainer.push_to_hub(dataset_name=script_args.dataset_name)
