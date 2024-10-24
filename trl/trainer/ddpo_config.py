@@ -127,8 +127,8 @@ class DDPOConfig:
     project_kwargs: dict = field(default_factory=dict)
     tracker_project_name: str = "trl"
     logdir: str = "logs"
-    num_epochs: int = 90000
-    save_freq: int = 1500
+    num_epochs: int = 1500 # 90000
+    save_freq: int = 20 # 1500
     num_checkpoint_limit: int = 50
     mixed_precision: str = "fp16"
     allow_tf32: bool = True

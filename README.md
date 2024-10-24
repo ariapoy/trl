@@ -5,7 +5,16 @@
 ### Install
 
 ```shell
+conda create -n trl python=3.11
+pip install -e .
 pip install diffusers peft
+```
+
+### Run experiments
+
+```shell
+cd examples/scripts
+time accelerate launch --config_file twcc_trl.yaml ddpo.py
 ```
 
 <div style="text-align: center">
